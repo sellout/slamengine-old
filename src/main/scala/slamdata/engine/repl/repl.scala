@@ -31,11 +31,11 @@ object Repl {
   sealed trait Command
   object Command {
     val ExitPattern         = "(?:exit)|(?:quit)".r
-    val CdPattern           = "cd +(.+)".r
+    val CdPattern           = "cd(?: +(.+))?".r
     val SelectPattern       = "(select +.+)".r
     val NamedSelectPattern  = "(\\w+) *:= *(select +.+)".r
-    val LsPattern           = "ls( +.+)".r
-    val HelpPattern         = "(?:help)|(?:commands)".r
+    val LsPattern           = "ls(?: +(.+))?".r
+    val HelpPattern         = "(?:help)|(?:commands)|\\?".r
 
     case object Exit extends Command
     case object Unknown extends Command
@@ -49,38 +49,48 @@ object Repl {
 
   case class RunState(printer: Printer, mounted: Map[Path, Backend], path: Path = Path.Root, unhandled: Option[Command] = None)
 
-  private def commandInput: Task[(Printer, Process[Task, Command])] = Task.delay {
+  private def parseCommand(input: String): Command = {
     import Command._
-      
+    
+    input match {
+      case ExitPattern()        => Exit
+      case CdPattern(path)      => Cd(if (path == null || path.trim.length == 0) "/" else path.trim)
+      case SelectPattern(query) => Select(None, query)
+      case NamedSelectPattern(name, query) => Select(Some(name), query)
+      case LsPattern(path)      => Ls(if (path == null || path.trim.length == 0) None else Some(path.trim))
+      case HelpPattern()        => Help
+      case _                    => Unknown
+    }
+  }
+
+  private def commandInput: Task[(Printer, Process[Task, Command])] = Task.delay {
     val console = new Console(new SettingsBuilder().parseOperators(false).create())
 
     console.setPrompt(new Prompt("slamdata$ "))
 
     val out = (s: String) => Task.delay(console.getShell.out().println(s))
 
-    val (queue, source) = async.queue[String]
+    val (queue, source) = async.queue[Command](Strategy.Sequential)
     
     console.setConsoleCallback(new AeshConsoleCallback() {
       override def execute(output: ConsoleOperation): Int = {
         val input = output.getBuffer.trim
 
-        queue.enqueue(input)
+        val command = parseCommand(input)
+        command match {
+          case Command.Exit => console.stop()
+          case _ => ()
+        }
 
+        queue.enqueue(command)
+        
         0
       }
     })
 
     console.start()
 
-    (out, source.map {
-      case ExitPattern()        => Exit
-      case CdPattern(path)      => Cd(path)
-      case SelectPattern(query) => Select(None, query)
-      case NamedSelectPattern(name, query) => Select(Some(name), query)
-      case LsPattern(path)      => Ls(if (path.trim.length == 0) None else Some(path.trim))
-      case HelpPattern()        => Help
-      case _                    => Unknown
-    })
+    (out, source)
   }
 
   def showHelp(state: RunState): Process[Task, Unit] = Process.eval(
@@ -103,45 +113,53 @@ object Repl {
     )
   )
 
-  def select(state: RunState, query: String, name: Option[String]): Process[Task, Unit] = state.mounted.get(state.path).map { backend =>
+  def select(state: RunState, query: String, name: Option[String]): Process[Task, Unit] = 
+    state.mounted.get(state.path).map { backend =>
+      import state.printer
+
+      Process.eval(backend.eval(Query(query), Path(name getOrElse("tmp"))) flatMap {
+        case (log, results) =>
+          for {
+            _ <- printer(log.toString)
+
+            preview = (results |> process1.take(10)).runLog.run
+
+            _ <- if (preview.length == 0) printer("No results found")
+                 else printer(preview.mkString("\n") + "\n...\n")
+          } yield ()
+      }) handle {
+        case e : slamdata.engine.Error => Process.eval {
+          for {
+            _ <- printer("A SlamData-specific error occurred during evaluation of the query")
+            _ <- printer(e.fullMessage)
+          } yield ()
+        }
+
+        case e => Process.eval {
+          // An exception was thrown during evaluation; we cannot recover any logging that
+          // might have been done, but at least we can capture the stack trace to aid 
+          // debugging:
+          for {
+            _ <- printer("A generic error occurred during evaluation of the query")
+            - <- printer(JavaUtil.stackTrace(e))
+          } yield ()
+        }
+      }
+    }.getOrElse(Process.eval(state.printer("There is no database mounted to the path " + state.path)))
+
+  
+
+  
+  def ls(state: RunState, path: Option[String]): Process[Task, Unit] = Process.eval({
     import state.printer
 
-    Process.eval(backend.eval(Query(query), Path(name getOrElse("tmp"))) flatMap {
-      case (log, results) =>
-        for {
-          _ <- printer(log.toString)
-
-          preview = (results |> process1.take(10)).runLog.run
-
-          _ <- if (preview.length == 0) printer("No results found")
-               else printer(preview.mkString("\n") + "\n...\n")
-        } yield ()
-    }) handle {
-      case e : slamdata.engine.Error => Process.eval {
-        for {
-          _ <- printer("A SlamData-specific error occurred during evaluation of the query")
-          _ <- printer(e.fullMessage)
-        } yield ()
+    state.mounted.get(state.path).map { backend =>
+      // TODO: Support nesting
+      backend.dataSource.ls.flatMap { paths =>
+        state.printer(paths.mkString("\n"))
       }
-
-      case e => Process.eval {
-        // An exception was thrown during evaluation; we cannot recover any logging that
-        // might have been done, but at least we can capture the stack trace to aid 
-        // debugging:
-        for {
-          _ <- printer("A generic error occurred during evaluation of the query")
-          - <- printer(JavaUtil.stackTrace(e))
-        } yield ()
-      }
-    }
-  }.getOrElse(Process.eval(state.printer("There is no database mounted to the path " + state.path)))
-
-  
-
-  
-  def ls(state: RunState, path: Option[String]): Process[Task, Unit] = Process.eval(
-    state.printer("Sorry, no information on directory structure yet.")
-  )
+    }.getOrElse(state.printer("Sorry, no information on directory structure yet."))
+  })
 
   def run(args: Array[String]): Process[Task, Unit] = {
     import Command._
@@ -182,7 +200,6 @@ object Repl {
   def main(args: Array[String]) {
     (for {
       _ <- run(args).run
-      _ <- Task.delay(System.exit(0))
     } yield ()).run
   }
 }

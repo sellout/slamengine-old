@@ -40,6 +40,7 @@ class PlannerSpec extends Specification with CompilerHelpers {
   }
 
   "planner" should {
+// /*
     "plan simple select *" in {
       testPhysicalPlanCompile(
         "select * from foo", 
@@ -56,7 +57,7 @@ class PlannerSpec extends Specification with CompilerHelpers {
           PipelineTask(
             ReadTask(Collection("foo")),
             Pipeline(List(
-              Group(Grouped(Map(BsonField.Name("0") -> Count)), Literal(Bson.Int32(1)))
+              Group(Grouped(Map(BsonField.Name("0") -> Count)), -\/(Literal(Bson.Int32(1))))
             ))
           )
         )
@@ -70,7 +71,7 @@ class PlannerSpec extends Specification with CompilerHelpers {
           PipelineTask(
             ReadTask(Collection("foo")),
             Pipeline(List(
-              Project(Reshape(Map(BsonField.Name("bar") -> -\/(DocField(BsonField.Name("bar"))))))
+              Project(Reshape.Doc(Map(BsonField.Name("bar") -> -\/(DocField(BsonField.Name("bar"))))))
             ))
           )
         )
@@ -84,7 +85,7 @@ class PlannerSpec extends Specification with CompilerHelpers {
           PipelineTask(
             ReadTask(Collection("foo")),
             Pipeline(List(
-              Project(Reshape(Map(BsonField.Name("bar") -> -\/(DocField(BsonField.Name("bar"))))))
+              Project(Reshape.Doc(Map(BsonField.Name("bar") -> -\/(DocField(BsonField.Name("bar"))))))
             ))
           )
         )
@@ -98,7 +99,7 @@ class PlannerSpec extends Specification with CompilerHelpers {
           PipelineTask(
             ReadTask(Collection("foo")),
             Pipeline(List(
-              Project(Reshape(Map(
+              Project(Reshape.Doc(Map(
                 BsonField.Name("bar") -> -\/(DocField(BsonField.Name("bar"))),
                 BsonField.Name("baz") -> -\/(DocField(BsonField.Name("baz")))
               )))
@@ -115,7 +116,7 @@ class PlannerSpec extends Specification with CompilerHelpers {
           PipelineTask(
             ReadTask(Collection("baz")),
             Pipeline(List(
-              Project(Reshape(Map(BsonField.Name("0") -> -\/ (ExprOp.Add(DocField(BsonField.Name("foo")), DocField(BsonField.Name("bar")))))))
+              Project(Reshape.Doc(Map(BsonField.Name("0") -> -\/ (ExprOp.Add(DocField(BsonField.Name("foo")), DocField(BsonField.Name("bar")))))))
             ))
           )
         )
@@ -129,12 +130,51 @@ class PlannerSpec extends Specification with CompilerHelpers {
           PipelineTask(
             ReadTask(Collection("foo")),
             Pipeline(List(
-              Match(Selector.Doc(Map(BsonField.Name("bar") -> Selector.Gt(Bson.Int64(10)))))
+              Match(Selector.Doc(BsonField.Name("bar") -> Selector.Gt(Bson.Int64(10))))
             ))
           )
         )
       )
     }
+    
+    "plan filter with between" in {
+      testPhysicalPlanCompile(
+        "select * from foo where bar between 10 and 100",
+        Workflow(
+          PipelineTask(
+            ReadTask(Collection("foo")),
+            Pipeline(List(
+              Match(
+                Selector.And(
+                  Selector.Doc(BsonField.Name("bar") -> Selector.Gte(Bson.Int64(10))),
+                  Selector.Doc(BsonField.Name("bar") -> Selector.Lte(Bson.Int64(100)))
+                )
+              )
+            ))
+          )
+        )
+      )
+    }.pendingUntilFixed
+    
+    "plan complex filter" in {
+      testPhysicalPlanCompile(
+        "select * from foo where bar > 10 and (baz = 'quux' or foop = 'zebra')",
+        Workflow(
+          PipelineTask(
+            ReadTask(Collection("foo")),
+            Pipeline(List(
+              Match(Selector.And(
+                Selector.Doc(BsonField.Name("bar") -> Selector.Gt(Bson.Int64(10))),
+                Selector.Or(
+                  Selector.Doc(BsonField.Name("baz") -> Selector.Eq(Bson.Text("quux"))),
+                  Selector.Doc(BsonField.Name("foop") -> Selector.Eq(Bson.Text("zebra")))
+                )
+              ))
+            ))
+          )
+        )
+      )
+    }.pendingUntilFixed // failing during type-checking
     
     "plan simple sort" in {
       testPhysicalPlanCompile(
@@ -143,8 +183,11 @@ class PlannerSpec extends Specification with CompilerHelpers {
           PipelineTask(
             ReadTask(Collection("foo")),
             Pipeline(List(
-              Project(Reshape(Map(BsonField.Name("bar") -> -\/(DocField(BsonField.Name("bar")))))),
-              Sort(NonEmptyList(BsonField.Name("bar") -> Ascending))
+              Project(Reshape.Doc(Map(
+                BsonField.Name("bar") -> -\/(DocField(BsonField.Name("bar"))),
+                BsonField.Name("__sd_tmp_1") -> \/-(Reshape.Arr(Map(BsonField.Index(0) -> -\/(DocField(BsonField.Name("bar"))))))
+              ))),
+              Sort(NonEmptyList(BsonField.Name("__sd_tmp_1") \ BsonField.Index(0) -> Ascending))
             ))
           )
         )
@@ -163,40 +206,41 @@ class PlannerSpec extends Specification with CompilerHelpers {
           )
         )
       )
-    }
+    } 
+// */
     
     "plan simple sort with field not in projections" in {
       testPhysicalPlanCompile(
-        "select bar from foo order by baz",
+        "select name from person order by height",
         Workflow(
           PipelineTask(
-            ReadTask(Collection("foo")),
+            ReadTask(Collection("person")),
             Pipeline(List(
               Project(
-                Reshape(
+                Reshape.Doc(
                   Map(
-                    BsonField.Name("bar")     -> -\/(DocField(BsonField.Name("bar"))),
-                    BsonField.Name("__sd__0") -> -\/(DocField(BsonField.Name("baz")))
+                    BsonField.Name("name")     -> -\/(DocField(BsonField.Name("name"))),
+                    BsonField.Name("__sd__0") -> -\/(DocField(BsonField.Name("height")))
                   )
                 )
               ),
               Sort(NonEmptyList(BsonField.Name("__sd__0") -> Ascending)),
-              Project(Reshape(Map(BsonField.Name("bar") -> -\/(DocField(BsonField.Name("bar"))))))
+              Project(Reshape.Doc(Map(BsonField.Name("name") -> -\/(DocField(BsonField.Name("name"))))))
             ))
           )
         )
       )
-    }
-    
+    }.pendingUntilFixed
+// /*
     "plan multiple column sort with wildcard" in {
       testPhysicalPlanCompile(
-        "select * from foo order by bar, baz",
+        "select * from foo order by bar, baz desc",
         Workflow(
           PipelineTask(
             ReadTask(Collection("foo")),
             Pipeline(List(
               Sort(NonEmptyList(BsonField.Name("bar") -> Ascending, 
-                                BsonField.Name("baz") -> Ascending
+                                BsonField.Name("baz") -> Descending
               ))
             ))
           )
@@ -223,6 +267,6 @@ class PlannerSpec extends Specification with CompilerHelpers {
         )
       )
     }
-    
+// */    
   }
 }

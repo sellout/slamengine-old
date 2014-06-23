@@ -13,10 +13,11 @@ import org.specs2.execute.PendingUntilFixed
 class CompilerSpec extends Specification with CompilerHelpers {
   import StdLib._
   import structural._
-  import math._
-  import set._
-  import relations._
   import agg._
+  import math._
+  import relations._
+  import set._
+  import string._
   import LogicalPlan._
   import SemanticAnalysis._
 
@@ -147,6 +148,69 @@ class CompilerSpec extends Specification with CompilerHelpers {
                 )
             ),
             free('tmp1)
+          )
+        )
+      )
+    }
+    
+    "compile negate" in {
+      testLogicalPlanCompile(
+        "select -foo from bar",
+        letOne('tmp0,
+          read("bar"),
+          letOne('tmp1,
+            makeObj(
+              "0" ->
+                Multiply(
+                  constant(Data.Int(-1)),
+                  ObjectProject(free('tmp0), constant(Data.Str("foo")))
+                )
+            ),
+            free('tmp1)
+          )
+        )
+      )
+    }
+    
+    "compile concat" in {
+      testLogicalPlanCompile(
+        "select concat(foo, concat(' ', bar)) from baz",
+        letOne('tmp0,
+          read("baz"),
+          letOne('tmp1,
+            makeObj(
+              "0" ->
+                Concat(
+                  ObjectProject(free('tmp0), constant(Data.Str("foo"))),
+                  Concat(
+                    constant(Data.Str(" ")),
+                    ObjectProject(free('tmp0), constant(Data.Str("bar")))
+                  )
+                )
+            ),
+            free('tmp1)
+          )
+        )
+      )
+    }
+    
+    "compile like" in {
+      testLogicalPlanCompile(
+        "select * from foo where bar like 'a%'",
+        letOne('tmp0,
+          read("foo"),
+          letOne('tmp1,
+            Filter(
+              free('tmp0),
+              Like(
+                ObjectProject(free('tmp0), constant(Data.Str("bar"))),
+                constant(Data.Str("a%"))
+              )
+            ),
+            letOne('tmp2,
+              free('tmp1),
+              free('tmp2)
+            )
           )
         )
       )
@@ -300,7 +364,10 @@ class CompilerSpec extends Specification with CompilerHelpers {
               OrderBy(
                 free('tmp1),
                 MakeArray(
-                  ObjectProject(free('tmp1), constant(Data.Str("__sd__0")))
+                  makeObj(
+                    "key" -> ObjectProject(free('tmp1), constant(Data.Str("__sd__0"))),
+                    "order" -> constant(Data.Str("ASC"))
+                  )
                 )
               ),
               letOne('tmp3,
@@ -329,7 +396,10 @@ class CompilerSpec extends Specification with CompilerHelpers {
               OrderBy(
                 free('tmp1),
                 MakeArray(
-                  ObjectProject(free('tmp1), constant(Data.Str("name")))
+                  makeObj(
+                    "key" -> ObjectProject(free('tmp1), constant(Data.Str("name"))),
+                    "order" -> constant(Data.Str("ASC"))
+                  )
                 )
               ),
               free('tmp2)
@@ -350,7 +420,42 @@ class CompilerSpec extends Specification with CompilerHelpers {
               OrderBy(
                 free('tmp1),
                 MakeArray(
-                  ObjectProject(free('tmp1), constant(Data.Str("height")))
+                  makeObj(
+                    "key" -> ObjectProject(free('tmp1), constant(Data.Str("height"))),
+                    "order" -> constant(Data.Str("ASC"))
+                  )
+                )
+              ),
+              free('tmp2)
+            )
+          )
+        )
+      )
+    }
+    
+    "compile simple order by with ascending and descending" in {
+      testLogicalPlanCompile(
+        "select * from person order by height desc, name",
+        letOne('tmp0,
+          read("person"),
+          letOne('tmp1,  // Another silly temporary var here
+            free('tmp0),
+            letOne('tmp2,
+              OrderBy(
+                free('tmp1),
+                ArrayConcat(
+                  MakeArray(
+                    makeObj(
+                      "key" -> ObjectProject(free('tmp1), constant(Data.Str("height"))),
+                      "order" -> constant(Data.Str("DESC"))
+                    )
+                  ),
+                  MakeArray(
+                    makeObj(
+                      "key" -> ObjectProject(free('tmp1), constant(Data.Str("name"))),
+                      "order" -> constant(Data.Str("ASC"))
+                    )
+                  )
                 )
               ),
               free('tmp2)
@@ -388,7 +493,10 @@ class CompilerSpec extends Specification with CompilerHelpers {
               OrderBy(
                 free('tmp1),
                 MakeArray(
-                  ObjectProject(free('tmp1), constant(Data.Str("__sd__0")))
+                  makeObj(
+                    "key" -> ObjectProject(free('tmp1), constant(Data.Str("__sd__0"))),
+                    "order" -> constant(Data.Str("ASC"))
+                  )
                 )
               ),
               letOne('tmp3,
@@ -452,8 +560,11 @@ class CompilerSpec extends Specification with CompilerHelpers {
                   letOne('tmp5,
                     OrderBy(  // order by cm
                       free('tmp4),
-                      MakeArray(  // TODO: should this be elminated?
-                        ObjectProject(free('tmp4), constant(Data.Str("cm")))
+                      MakeArray(
+                        makeObj(
+                          "key" -> ObjectProject(free('tmp4), constant(Data.Str("cm"))),
+                          "order" -> constant(Data.Str("ASC"))
+                        )
                       )
                     ),
                     letOne('tmp6,
@@ -493,6 +604,28 @@ class CompilerSpec extends Specification with CompilerHelpers {
       )
     }
 
-  }
+    "compile simple inner equi-join" in {
+      testLogicalPlanCompile(
+        "select foo.name, bar.address from foo join bar on foo.id = bar.foo_id",
+        letOne('tmp0,
+               let(Map('left1 -> read("foo"),
+                       'right2 -> read("bar")),
+                 join(free('left1), free('right2),
+                      JoinType.Inner, JoinRel.Eq,
+                      ObjectProject(free('left1), constant(Data.Str("id"))),
+                      ObjectProject(free('right2), constant(Data.Str("foo_id"))))),
+          letOne('tmp3,
+                 makeObj(
+                   "name" ->
+                     ObjectProject(
+                       ObjectProject(free('tmp0), constant(Data.Str("left"))),
+                       constant(Data.Str("name"))),
+                   "address" ->
+                     ObjectProject(
+                       ObjectProject(free('tmp0), constant(Data.Str("right"))),
+                       constant(Data.Str("address")))),
+            free('tmp3))))
+    }
 
+  }
 }

@@ -196,14 +196,14 @@ sealed trait BsonField {
 
   import BsonField._
 
-  def \ (that: BsonField) = (this, that) match {
+  def \ (that: BsonField): BsonField = (this, that) match {
     case (x : Leaf, y : Leaf) => Path(NonEmptyList.nels(x, y))
     case (x : Path, y : Leaf) => Path(NonEmptyList.nel(x.values.head, x.values.tail :+ y))
     case (y : Leaf, x : Path) => Path(NonEmptyList.nel(y, x.values.list))
     case (x : Path, y : Path) => Path(NonEmptyList.nel(x.values.head, x.values.tail ++ y.values.list))
   }
 
-  def \\ (tail: List[BsonField]) = this match {
+  def \\ (tail: List[BsonField]): BsonField = this match {
     case l : Leaf => Path(NonEmptyList.nel(l, tail.flatMap(_.flatten)))
     case p : Path => Path(NonEmptyList.nel(p.values.head, p.values.tail ::: tail.flatMap(_.flatten)))
   }
@@ -230,20 +230,29 @@ sealed trait BsonField {
 
 object BsonField {
   def apply(v: List[BsonField.Leaf]): Option[BsonField] = v match {
-    case head :: tail => Some(Path(NonEmptyList.nel(head, tail)))
     case Nil => None
+    case head :: Nil => Some(head)
+    case head :: tail => Some(Path(NonEmptyList.nel(head, tail)))
   }
 
   sealed trait Leaf extends BsonField {
     def asText = Path(NonEmptyList(this)).asText
 
     def flatten: List[Leaf] = this :: Nil
+
+    // Distinction between these is artificial as far as BSON concerned so you 
+    // can always translate a leaf to a Name (but not an Index since the key might
+    // not be numeric).
+    def toName: Name = this match {
+      case n @ Name(_) => n
+      case i @ Index(_) => Name(i.toString)
+    }
   }
 
   case class Name(value: String) extends Leaf
   case class Index(value: Int) extends Leaf
 
-  case class Path(values: NonEmptyList[Leaf]) extends BsonField {
+  private case class Path(values: NonEmptyList[Leaf]) extends BsonField {
     def flatten: List[Leaf] = values.list
 
     def asText = (values.list.zipWithIndex.map { 
@@ -254,7 +263,8 @@ object BsonField {
     }).mkString("")
   }
 
-  private lazy val TempNames: EphemeralStream[BsonField.Name] = EphemeralStream.iterate(0)(_ + 1).map(i => BsonField.Name("__sd_tmp_" + i.toString))
+  private lazy val TempNames:   EphemeralStream[BsonField.Name]  = EphemeralStream.iterate(0)(_ + 1).map(i => BsonField.Name("__sd_tmp_" + i.toString))
+  private lazy val TempIndices: EphemeralStream[BsonField.Index] = EphemeralStream.iterate(0)(_ + 1).map(i => BsonField.Index(i))
 
   def genUniqName(v: Iterable[BsonField.Name]): BsonField.Name = genUniqNames(1, v).head
 
@@ -262,5 +272,13 @@ object BsonField {
     val s = v.toSet
 
     TempNames.filter(n => !s.contains(n)).take(n).toList
+  }
+
+  def genUniqIndex(v: Iterable[BsonField.Index]): BsonField.Index = genUniqIndices(1, v).head
+
+  def genUniqIndices(n: Int, v: Iterable[BsonField.Index]): List[BsonField.Index] = {
+    val s = v.toSet
+
+    TempIndices.filter(n => !s.contains(n)).take(n).toList
   }
 }
